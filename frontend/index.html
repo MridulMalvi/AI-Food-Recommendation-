@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="A conversational Gwalior food recommendation assistant." />
+  <title>Gwalior Foodie | Find your perfect bite</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div class="brand"><span class="brand-mark">✦</span> Gwalior Foodie</div>
+      <div class="hero-copy">
+        <p class="eyebrow">YOUR LOCAL FOOD COMPANION</p>
+        <h1>What are you<br /><em>craving?</em></h1>
+        <p>Tell us how you feel, what you love, or your budget. We’ll find the Gwalior dishes that fit.</p>
+      </div>
+      <div class="hero-orb" aria-hidden="true">🍛</div>
+    </header>
+
+    <section class="chat-panel" aria-label="Food recommendation chat">
+      <div id="conversation" class="conversation" aria-live="polite">
+        <article class="message assistant-message welcome-message">
+          <div class="avatar">✦</div>
+          <div class="bubble"><strong>Hello! I’m your Gwalior food guide.</strong><br />Looking for a quick dinner,
+            comforting vegetarian food, or something delicious near you?</div>
+        </article>
+      </div>
+      <div class="suggestions" aria-label="Suggested prompts">
+        <button type="button" data-prompt="Vegetarian under ₹250">Vegetarian under ₹250</button>
+        <button type="button" data-prompt="Give me spicy food">🌶 Spicy food</button>
+        <button type="button" data-prompt="I am tired and want comfort food">Comfort food</button>
+        <button type="button" data-prompt="I want North Indian food">North Indian</button>
+        <button type="button" data-prompt="Food near City Centre">Near City Centre</button>
+        <button type="button" data-prompt="Quick dinner">Quick dinner</button>
+      </div>
+      <form id="chat-form" class="composer">
+        <label class="sr-only" for="message-input">Your food request</label>
+        <input id="message-input" type="text" maxlength="1000" autocomplete="off"
+          placeholder="Try “spicy vegetarian food under ₹250”" />
+        <button id="send-button" type="submit" aria-label="Send message">➜</button>
+      </form>
+      <p id="connection-note" class="connection-note">Recommendations are ranked using the local trained model.</p>
+    </section>
+  </main>
+  <template id="card-template">
+    <article class="food-card">
+      <div class="food-photo"><img alt="" loading="lazy" /><span class="image-fallback">🍽️</span><span
+          class="match"></span></div>
+      <div class="card-content">
+        <h3></h3>
+        <p class="restaurant"></p>
+        <div class="quick-facts"><span class="rating"></span><strong class="price"></strong></div>
+        <p class="location"></p>
+        <div class="badges"></div>
+        <div class="delivery"></div>
+      </div>
+    </article>
+  </template>
+  <script src="script.js"></script>
+</body>
+
+</html>
