@@ -116,32 +116,68 @@ def _human_reason(
     dietary: str | None,
     spicy: bool | None,
     location: str | None,
+    budget: int | float | None,
     rating: float,
+    delivery_minutes: int,
     cuisine: str,
     is_boosted: bool,
+    sim_norm: float,
+    quality_score: float,
 ) -> str:
-    """Generate a concise, human-readable explanation for each recommendation."""
-    clauses: list[str] = []
+    """Generate a rich, preference-aware explanation sentence for each recommendation.
+
+    Mentions every user preference that was specified, then adds objective dish
+    qualities (rating, delivery speed) to explain *why* this dish ranked highly.
+    """
+    # ── Preference clauses (what the user asked for) ────────────────────────
+    pref_parts: list[str] = []
     if mood:
-        clauses.append(f"matches your {mood} mood")
+        pref_parts.append(f"a {mood}-food mood")
     if dietary:
-        clauses.append(f"it's {dietary.lower()}")
+        pref_parts.append(f"{dietary.lower()} options")
     if spicy is True:
-        clauses.append("it's spicy")
+        pref_parts.append("spicy food")
     elif spicy is False:
-        clauses.append("it's mild")
+        pref_parts.append("mild (non-spicy) food")
+    if budget is not None:
+        pref_parts.append(f"a budget under \u20b9{int(budget)}")
     if location:
-        clauses.append(f"it's near {location}")
-    if rating >= 4.3:
-        clauses.append("it's highly rated")
+        pref_parts.append(f"food near {location}")
+
+    # ── Quality clauses (why this dish scores highly) ────────────────────────
+    quality_parts: list[str] = []
     if is_boosted:
-        clauses.append(f"you've liked {cuisine} before")
+        quality_parts.append(f"you\u2019ve liked {cuisine} before")
+    if rating >= 4.5:
+        quality_parts.append(f"it\u2019s top-rated (\u2605{rating:.1f})")
+    elif rating >= 4.2:
+        quality_parts.append(f"it\u2019s highly rated (\u2605{rating:.1f})")
+    if delivery_minutes <= 20:
+        quality_parts.append(f"fast delivery in just {delivery_minutes}\u202fmin")
+    elif delivery_minutes <= 35 and not quality_parts:
+        quality_parts.append(f"delivers in {delivery_minutes}\u202fmin")
+    # fallback quality signal
+    if not quality_parts and quality_score >= 0.7:
+        quality_parts.append("it\u2019s a top pick in Gwalior")
+    elif not quality_parts:
+        quality_parts.append("it\u2019s a popular choice in Gwalior")
 
-    if not clauses:
-        clauses.append("it's a popular choice in Gwalior")
-
-    reason_body = ", ".join(clauses[:3])  # cap at 3 reasons to keep it readable
-    return f"Recommended because {reason_body}."
+    # ── Assemble the sentence ────────────────────────────────────────────────
+    if pref_parts:
+        # "Recommended because you selected spicy food and a budget under ₹250 — ..."
+        pref_str = " and ".join(
+            [", ".join(pref_parts[:-1]), pref_parts[-1]] if len(pref_parts) > 1
+            else pref_parts
+        )
+        quality_str = ", ".join(quality_parts[:2])
+        return f"Recommended because you selected {pref_str} \u2014 {quality_str}."
+    else:
+        # No explicit preferences — lead with quality
+        quality_str = " and ".join(
+            [", ".join(quality_parts[:-1]), quality_parts[-1]] if len(quality_parts) > 1
+            else quality_parts
+        )
+        return f"Recommended because {quality_str}."
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +422,17 @@ def recommend(
             "image_url": str(row.get("image_url", "") or ""),
             "match_percent": match_pct,
             "reason": _human_reason(
-                mood, dietary, spicy, location,
-                float(row["rating"]), row["cuisine"], is_boosted,
+                mood=mood,
+                dietary=dietary,
+                spicy=spicy,
+                location=location,
+                budget=budget,
+                rating=float(row["rating"]),
+                delivery_minutes=int(row["delivery_minutes"]),
+                cuisine=row["cuisine"],
+                is_boosted=is_boosted,
+                sim_norm=float(sim_scores_norm[local_i]),
+                quality_score=float(quality[local_i]),
             ),
         })
 
@@ -415,7 +460,7 @@ def get_areas() -> list[str]:
 # ---------------------------------------------------------------------------
 
 CATEGORY_MAP: dict[str, dict[str, Any]] = {
-    "chinese":      {"label": "Chinese",       "emoji": "🍜", "keywords": ["chinese"]},
+    "chinese":      {"label": "Chinese",       "emoji": "🍜", "keywords": ["chinese", "noodles", "fried rice", "manchurian", "chow mein"]},
     "italian":      {"label": "Italian",        "emoji": "🍝", "keywords": ["italian", "pasta", "pizza"]},
     "north indian": {"label": "North Indian",   "emoji": "🥘", "keywords": ["north indian", "punjabi", "mughlai"]},
     "south indian": {"label": "South Indian",   "emoji": "🥥", "keywords": ["south indian", "idli", "dosa", "kerala"]},
@@ -428,7 +473,6 @@ CATEGORY_MAP: dict[str, dict[str, Any]] = {
     "pizza":        {"label": "Pizza",          "emoji": "🍕", "keywords": ["pizza"]},
     "burger":       {"label": "Burgers",        "emoji": "🍔", "keywords": ["burger"]},
     "continental":  {"label": "Continental",    "emoji": "🥗", "keywords": ["continental"]},
-    "chinese":      {"label": "Chinese",        "emoji": "🍜", "keywords": ["chinese", "noodles", "fried rice", "manchurian", "chow mein"]},
     "rajasthani":   {"label": "Rajasthani",     "emoji": "🫕", "keywords": ["rajasthani", "dal baati"]},
     "tandoor":      {"label": "Tandoor",        "emoji": "🔥", "keywords": ["tandoor", "tandoori"]},
 }
@@ -537,8 +581,17 @@ def recommend_by_category(
             "image_url": str(row.get("image_url", "") or ""),
             "match_percent": match_pct,
             "reason": _human_reason(
-                label.lower(), None, None, None,
-                float(row["rating"]), row["cuisine"], is_boosted,
+                mood=None,
+                dietary=None,
+                spicy=None,
+                location=None,
+                budget=None,
+                rating=float(row["rating"]),
+                delivery_minutes=int(row["delivery_minutes"]),
+                cuisine=row["cuisine"],
+                is_boosted=is_boosted,
+                sim_norm=float(sim_norm[local_i]),
+                quality_score=float(quality[local_i]),
             ),
         })
 

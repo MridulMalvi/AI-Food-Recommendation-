@@ -282,16 +282,18 @@ async function sendMessage(message) {
     }
 
     const isPersonalised = payload.personalized;
-    noteEl.textContent = isPersonalised
-      ? "✨ Personalised with your liked dishes · TF-IDF + Cosine Similarity"
-      : "Recommendations powered by TF-IDF + Cosine Similarity · LangChain Agent";
+    if (noteEl) {
+      noteEl.textContent = isPersonalised
+        ? "✨ Personalised with your liked dishes · TF-IDF + Cosine Similarity"
+        : "Recommendations powered by TF-IDF + Cosine Similarity · LangChain Agent";
+    }
   } catch (err) {
     document.querySelector("#typing")?.remove();
     addMessage(
       "I can't reach the recommendation service right now. Please ensure the server is running.",
       "assistant"
     );
-    noteEl.textContent = err.message;
+    if (noteEl) noteEl.textContent = err.message;
   } finally {
     input.disabled = false;
     sendButton.disabled = false;

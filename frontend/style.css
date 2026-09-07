@@ -716,3 +716,12 @@ body {
   }
 }
 
+/* Connection / algorithm note */
+.connection-note {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: center;
+  letter-spacing: 0.01em;
+  min-height: 1em;
+}
