@@ -1,147 +1,546 @@
-"""Dataset filtering and trained-model ranking for Gwalior food recommendations."""
+"""TF-IDF + Cosine Similarity + Quality Scaling recommender for Gwalior food.
+
+Algorithm:
+  1. Build a 'content soup' for each dish from mood_tags, meal_type, dietary,
+     cuisine, spicy, and area — then fit a TfidfVectorizer at startup.
+  2. Compute a base_quality score (0-1) by scaling 'rating' (higher = better)
+     and 'delivery_minutes' (lower = better) via MinMaxScaler.
+  3. At query time:
+     - Build a query soup from user inputs.
+     - Compute cosine similarity between query and all dishes.
+     - Apply a personal_boost when a dish's cuisine matches the cuisines of
+       the user's liked items.
+     - Combine scores: final = 0.55*sim + 0.30*quality + 0.15*personal_boost
+     - Hard-filter by budget and dietary before scoring.
+  4. Return top-N results with id, dish, restaurant, price, rating,
+     match_percent, reason, and other display fields.
+"""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import MinMaxScaler
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "gwalior_food_dataset_330_unique.csv"
 
-MODEL_FEATURES = [
-    "price", "rating", "distance_km", "delivery_minutes",
-    "cuisine", "dietary", "spicy", "area",
-]
 REQUIRED_COLUMNS = {
     "id", "restaurant", "dish", "cuisine", "price", "rating", "city", "area",
     "dietary", "spicy", "mood_tags", "meal_type", "distance_km",
     "delivery_minutes", "image_url",
 }
 
+# Score weights (must sum to 1.0)
+W_SIM = 0.55
+W_QUALITY = 0.30
+W_BOOST = 0.15
 
-class FoodRecommender:
-    """Applies user constraints first, then scores the remaining rows with the supplied model."""
 
-    def __init__(self, data_path: Path, model_path: Path) -> None:
-        if not data_path.is_file():
-            raise RuntimeError(f"Dataset not found. Expected it at: {data_path}")
-        if not model_path.is_file():
-            raise RuntimeError(
-                "Trained model not found. Place it at "
-                "backend/model/gwalior_food_recommendation_model.pkl"
-            )
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-        self.data = pd.read_csv(data_path)
-        missing = REQUIRED_COLUMNS.difference(self.data.columns)
-        if missing:
-            raise RuntimeError(f"Dataset is missing required columns: {', '.join(sorted(missing))}")
+def _split_tags(value: Any) -> list[str]:
+    """Parse comma-separated tag strings like 'comfort, happy' into a list."""
+    raw = str(value or "").strip("[] ")
+    return [item.strip().strip("'\"").lower() for item in raw.split(",") if item.strip().strip("'\"")]
 
-        # Keep the original display values and add normalized values only for matching.
-        for column in ("restaurant", "dish", "cuisine", "city", "area", "dietary"):
-            self.data[column] = self.data[column].fillna("").astype(str).str.strip()
-        for column in ("price", "rating", "distance_km", "delivery_minutes"):
-            self.data[column] = pd.to_numeric(self.data[column], errors="coerce").fillna(0)
-        self.data["spicy"] = self.data["spicy"].map(self._to_bool)
-        self.data["mood_list"] = self.data["mood_tags"].apply(self._split_tags)
-        self.data["meal_list"] = self.data["meal_type"].apply(self._split_tags)
-        
-        # Compatibility shim for pipelines serialized with older scikit-learn versions
+
+def _to_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _build_soup(row: pd.Series) -> str:
+    """Concatenate all content features into a single searchable text blob."""
+    parts = []
+    # mood_tags — repeat twice to upweight mood matching
+    moods = _split_tags(row.get("mood_tags", ""))
+    parts.extend(moods * 2)
+    # meal_type
+    parts.extend(_split_tags(row.get("meal_type", "")))
+    # dietary
+    dietary = str(row.get("dietary", "")).strip().lower()
+    if dietary:
+        parts.append(dietary)
+        parts.append(dietary.replace("-", "").replace(" ", ""))  # "nonvegetarian"
+    # cuisine
+    cuisine = str(row.get("cuisine", "")).strip().lower()
+    if cuisine:
+        parts.extend(cuisine.split())
+    # spicy
+    if _to_bool(row.get("spicy", False)):
+        parts.extend(["spicy", "hot", "masaledar"])
+    else:
+        parts.extend(["mild", "nonspicy"])
+    # area
+    area = str(row.get("area", "")).strip().lower()
+    if area:
+        parts.extend(area.split())
+    return " ".join(parts)
+
+
+def _build_query_soup(
+    mood: str | None,
+    dietary: str | None,
+    spicy: bool | None,
+    location: str | None,
+) -> str:
+    """Build a TF-IDF query soup from user inputs."""
+    parts: list[str] = []
+    if mood:
+        parts.extend([mood.strip().lower()] * 2)
+    if dietary:
+        d = dietary.strip().lower()
+        parts.append(d)
+        parts.append(d.replace("-", "").replace(" ", ""))
+    if spicy is True:
+        parts.extend(["spicy", "hot", "masaledar"])
+    elif spicy is False:
+        parts.extend(["mild", "nonspicy"])
+    if location:
+        parts.extend(location.strip().lower().split())
+    return " ".join(parts) if parts else "food"
+
+
+def _human_reason(
+    mood: str | None,
+    dietary: str | None,
+    spicy: bool | None,
+    location: str | None,
+    rating: float,
+    cuisine: str,
+    is_boosted: bool,
+) -> str:
+    """Generate a concise, human-readable explanation for each recommendation."""
+    clauses: list[str] = []
+    if mood:
+        clauses.append(f"matches your {mood} mood")
+    if dietary:
+        clauses.append(f"it's {dietary.lower()}")
+    if spicy is True:
+        clauses.append("it's spicy")
+    elif spicy is False:
+        clauses.append("it's mild")
+    if location:
+        clauses.append(f"it's near {location}")
+    if rating >= 4.3:
+        clauses.append("it's highly rated")
+    if is_boosted:
+        clauses.append(f"you've liked {cuisine} before")
+
+    if not clauses:
+        clauses.append("it's a popular choice in Gwalior")
+
+    reason_body = ", ".join(clauses[:3])  # cap at 3 reasons to keep it readable
+    return f"Recommended because {reason_body}."
+
+
+# ---------------------------------------------------------------------------
+# Module-level state — loaded once at import time
+# ---------------------------------------------------------------------------
+
+_df: pd.DataFrame | None = None
+_tfidf: TfidfVectorizer | None = None
+_tfidf_matrix = None       # sparse matrix
+_quality_scores: np.ndarray | None = None
+
+
+def _load() -> None:
+    """Load dataset, fit TF-IDF, and compute quality scores (once at startup)."""
+    global _df, _tfidf, _tfidf_matrix, _quality_scores
+
+    if not DATA_PATH.is_file():
+        raise RuntimeError(
+            f"Dataset not found at {DATA_PATH}. "
+            "Place 'gwalior_food_dataset_330_unique.csv' inside the 'data/' folder."
+        )
+
+    df = pd.read_csv(DATA_PATH)
+
+    # --- Validate required columns ---
+    missing = REQUIRED_COLUMNS.difference(df.columns)
+    if missing:
+        raise RuntimeError(f"Dataset is missing required columns: {', '.join(sorted(missing))}")
+
+    # --- Normalise string columns ---
+    for col in ("restaurant", "dish", "cuisine", "city", "area", "dietary"):
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    # --- Normalise numeric columns ---
+    for col in ("price", "rating", "distance_km", "delivery_minutes"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["spicy"] = df["spicy"].apply(_to_bool)
+    df["mood_list"] = df["mood_tags"].apply(_split_tags)
+    df["meal_list"] = df["meal_type"].apply(_split_tags)
+
+    # --- Build content soup for TF-IDF ---
+    df["content_soup"] = df.apply(_build_soup, axis=1)
+
+    # --- Fit TF-IDF ---
+    tfidf = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),
+        min_df=1,
+        stop_words=None,   # keep food domain words like "non"
+    )
+    tfidf_matrix = tfidf.fit_transform(df["content_soup"])
+
+    # --- Compute base quality score (0-1) ---
+    # rating: higher → better (scale 0-5 → 0-1)
+    # delivery_minutes: lower → better (invert after scaling)
+    scaler = MinMaxScaler()
+    quality_raw = df[["rating", "delivery_minutes"]].copy()
+    scaled = scaler.fit_transform(quality_raw)
+    rating_norm = scaled[:, 0]
+    delivery_norm = 1.0 - scaled[:, 1]     # invert: faster = higher score
+    quality_scores = 0.6 * rating_norm + 0.4 * delivery_norm
+
+    _df = df.reset_index(drop=True)
+    _tfidf = tfidf
+    _tfidf_matrix = tfidf_matrix
+    _quality_scores = quality_scores
+
+
+# Load on import
+_load()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def recommend(
+    mood: str | None = None,
+    budget: int | float | None = None,
+    location: str | None = None,
+    dietary: str | None = None,
+    spicy: bool | None = None,
+    user_liked_ids: list[int] | None = None,
+    top_n: int = 5,
+) -> list[dict[str, Any]]:
+    """Return up to top_n food recommendations as a list of dicts.
+
+    Hard filters (applied in order, each with a graceful fallback):
+        city     → always "Gwalior"
+        dietary  → Vegetarian / Non-Vegetarian
+        spicy    → True (spicy only) / False (mild only) / None (both)
+        mood     → must appear in dish mood_tags
+        budget   → price <= budget
+        location → area matches (relaxed if too few results)
+
+    TF-IDF cosine similarity then ranks *within* the filtered pool to prefer
+    matching cuisine, meal_type, and area nuances.
+
+    Returns
+    -------
+    list of dicts with keys:
+        id, dish, restaurant, cuisine, price, rating, area, dietary, spicy,
+        delivery_minutes, distance_km, image_url, match_percent, reason.
+    """
+    assert _df is not None, "Recommender not loaded — call _load() first."
+
+    top_n = max(1, min(top_n, 10))
+    MIN_POOL = max(top_n, 8)   # minimum candidates before we relax a filter
+
+    # ------------------------------------------------------------------ #
+    # 1. Start with all Gwalior dishes                                    #
+    # ------------------------------------------------------------------ #
+    base = _df[_df["city"].str.casefold() == "gwalior"].copy()
+
+    # ------------------------------------------------------------------ #
+    # 2. Hard filter: dietary (strict — user said veg/non-veg explicitly) #
+    # ------------------------------------------------------------------ #
+    if dietary:
+        d_norm = dietary.strip().casefold()
+        pool = base[base["dietary"].str.casefold() == d_norm]
+        base = pool if not pool.empty else base   # fallback: ignore dietary
+
+    # ------------------------------------------------------------------ #
+    # 3. Hard filter: spicy / mild                                        #
+    # ------------------------------------------------------------------ #
+    if spicy is not None:
+        pool = base[base["spicy"] == bool(spicy)]
+        base = pool if not pool.empty else base   # fallback: ignore spicy
+
+    # ------------------------------------------------------------------ #
+    # 4. Hard filter: mood tag (dish must advertise this mood)            #
+    # ------------------------------------------------------------------ #
+    if mood:
+        mood_norm = mood.strip().lower()
+        pool = base[base["mood_list"].apply(lambda tags: mood_norm in tags)]
+        if len(pool) >= top_n:
+            base = pool
+        elif len(pool) > 0:
+            base = pool   # use even a small set — better than ignoring mood
+
+    # ------------------------------------------------------------------ #
+    # 5. Hard filter: budget                                              #
+    # ------------------------------------------------------------------ #
+    if budget is not None:
         try:
-            import sklearn.compose._column_transformer as _ct
-            if not hasattr(_ct, "_RemainderColsList"):
-                _ct._RemainderColsList = type("_RemainderColsList", (list,), {})
-        except Exception:
+            pool = base[base["price"] <= float(budget)]
+            base = pool if not pool.empty else base   # fallback: ignore budget
+        except (ValueError, TypeError):
             pass
 
-        self.model = joblib.load(model_path)  # The model is loaded once during application startup.
+    # ------------------------------------------------------------------ #
+    # 6. Soft filter: location / area                                     #
+    # Only apply if enough dishes remain after mood+spicy+dietary.        #
+    # ------------------------------------------------------------------ #
+    if location:
+        loc_norm = location.strip().casefold()
+        pool = base[base["area"].str.casefold() == loc_norm]
+        if len(pool) >= top_n:
+            base = pool
+        # else: location becomes a TF-IDF preference, not a hard cut
 
-    @staticmethod
-    def _to_bool(value: Any) -> bool:
-        return str(value).strip().lower() in {"true", "1", "yes", "y"}
+    if base.empty:
+        # Ultimate fallback — return top-rated Gwalior dishes
+        base = _df[_df["city"].str.casefold() == "gwalior"].copy()
 
-    @staticmethod
-    def _split_tags(value: Any) -> list[str]:
-        raw = str(value or "").strip("[] ")
-        return [item.strip().strip("'\"").lower() for item in raw.split(",") if item.strip().strip("'\"")]
+    # ------------------------------------------------------------------ #
+    # 7. TF-IDF cosine similarity — rank within the filtered pool         #
+    # The query emphasises cuisine/meal_type/area preference signals.     #
+    # ------------------------------------------------------------------ #
+    query_soup = _build_query_soup(mood, dietary, spicy, location)
+    query_vec = _tfidf.transform([query_soup])
 
-    @property
-    def cuisines(self) -> list[str]:
-        return sorted(item for item in self.data["cuisine"].unique() if item)
+    cand_indices = base.index.tolist()
+    cand_matrix = _tfidf_matrix[cand_indices]
+    sim_scores = cosine_similarity(query_vec, cand_matrix).flatten()
 
-    @property
-    def areas(self) -> list[str]:
-        return sorted(item for item in self.data["area"].unique() if item)
+    # Normalise sim scores within this pool so they spread across [0, 1]
+    sim_min, sim_max = sim_scores.min(), sim_scores.max()
+    if sim_max > sim_min:
+        sim_scores_norm = (sim_scores - sim_min) / (sim_max - sim_min)
+    else:
+        sim_scores_norm = sim_scores   # all equal — quality will decide
 
-    def filter_candidates(self, preferences: dict[str, Any], ignored: set[str] | None = None) -> pd.DataFrame:
-        """Hard-filter records. `ignored` is only used by the explicit fallback sequence."""
-        ignored = ignored or set()
-        candidates = self.data[self.data["city"].str.casefold() == "gwalior"].copy()
+    # ------------------------------------------------------------------ #
+    # 8. Quality scores                                                   #
+    # ------------------------------------------------------------------ #
+    quality = _quality_scores[cand_indices]
 
-        budget = preferences.get("budget")
-        if budget is not None and "budget" not in ignored:
-            candidates = candidates[candidates["price"] <= float(budget)]
-        dietary = preferences.get("dietary")
-        if dietary and "dietary" not in ignored:
-            candidates = candidates[candidates["dietary"].str.casefold() == str(dietary).casefold()]
-        if preferences.get("spicy") is not None and "spicy" not in ignored:
-            candidates = candidates[candidates["spicy"] == bool(preferences["spicy"])]
-        for key, column in (("cuisine", "cuisine"), ("area", "area")):
-            value = preferences.get(key)
-            if value and key not in ignored:
-                candidates = candidates[candidates[column].str.casefold() == str(value).casefold()]
-        for key, column in (("mood", "mood_list"), ("meal_type", "meal_list")):
-            value = preferences.get(key)
-            if value and key not in ignored:
-                normalized = str(value).strip().lower()
-                candidates = candidates[candidates[column].apply(lambda tags: normalized in tags)]
-        return candidates
+    # ------------------------------------------------------------------ #
+    # 9. Personal boost (cuisine from liked dishes)                       #
+    # ------------------------------------------------------------------ #
+    liked_cuisines: set[str] = set()
+    if user_liked_ids:
+        liked_rows = _df[_df["id"].isin(user_liked_ids)]
+        liked_cuisines = set(liked_rows["cuisine"].str.casefold().unique())
 
-    def rank_candidates(self, candidates: pd.DataFrame) -> pd.DataFrame:
-        """Score candidates with the exact eight feature columns used to train the supplied pipeline."""
-        if candidates.empty:
-            return candidates
-        feature_frame = candidates.loc[:, MODEL_FEATURES].copy()
-        feature_frame["spicy"] = feature_frame["spicy"].astype(bool)
-        try:
-            scores = self.model.predict(feature_frame)
-        except Exception as exc:  # Give a useful error for an incompatible uploaded model.
-            raise RuntimeError(f"The trained model could not score the dataset: {exc}") from exc
-        ranked = candidates.copy()
-        # quality_score is expected to be a 0-1 target; clipping keeps the public match indicator stable.
-        ranked["recommendation_score"] = np.clip(np.asarray(scores, dtype=float), 0, 1)
-        return ranked.sort_values("recommendation_score", ascending=False, kind="stable")
+    boost = np.zeros(len(cand_indices))
+    if liked_cuisines:
+        for i, idx in enumerate(cand_indices):
+            if _df.loc[idx, "cuisine"].casefold() in liked_cuisines:
+                boost[i] = 1.0
 
-    def recommend(self, preferences: dict[str, Any], top_n: int = 5) -> tuple[list[dict[str, Any]], str | None]:
-        """Return up to five records, progressively relaxing only when there is no exact result."""
-        candidates = self.filter_candidates(preferences)
-        note: str | None = None
-        if candidates.empty:
-            relaxations = [
-                ({"area"}, "I couldn't find an exact match, so I relaxed the area preference."),
-                ({"area", "mood", "meal_type"}, "I couldn't find an exact match, so I relaxed area and occasion preferences."),
-                ({"area", "mood", "meal_type", "cuisine"}, "I couldn't find an exact match, so I also relaxed the cuisine preference."),
-                ({"area", "mood", "meal_type", "cuisine", "spicy"}, "I couldn't find an exact match, so I relaxed the spice preference."),
-                ({"area", "mood", "meal_type", "cuisine", "spicy", "dietary"}, "I couldn't find an exact match, so these are the closest Gwalior options."),
-                ({"area", "mood", "meal_type", "cuisine", "spicy", "dietary", "budget"}, "No option met every constraint, so these are the closest Gwalior options."),
-            ]
-            for ignored, message in relaxations:
-                candidates = self.filter_candidates(preferences, ignored)
-                if not candidates.empty:
-                    note = message
-                    break
+    # ------------------------------------------------------------------ #
+    # 10. Combined final score                                            #
+    # ------------------------------------------------------------------ #
+    final_scores = W_SIM * sim_scores_norm + W_QUALITY * quality + W_BOOST * boost
 
-        ranked = self.rank_candidates(candidates).head(max(1, min(top_n, 5)))
-        records: list[dict[str, Any]] = []
-        for _, row in ranked.iterrows():
-            records.append({
-                "id": int(row["id"]), "restaurant": row["restaurant"], "dish": row["dish"],
-                "cuisine": row["cuisine"], "price": float(row["price"]), "rating": float(row["rating"]),
-                "city": row["city"], "area": row["area"], "dietary": row["dietary"],
-                "spicy": bool(row["spicy"]), "mood_tags": list(row["mood_list"]),
-                "meal_type": list(row["meal_list"]), "distance_km": float(row["distance_km"]),
-                "delivery_minutes": int(row["delivery_minutes"]), "image_url": str(row["image_url"] or ""),
-                "recommendation_score": round(float(row["recommendation_score"]), 4),
-            })
-        return records, note
+    # ------------------------------------------------------------------ #
+    # 11. Shuffle tie-breaks to avoid returning the exact same order      #
+    #     when multiple dishes share identical final scores.              #
+    # ------------------------------------------------------------------ #
+    noise = np.random.default_rng().uniform(0, 0.005, len(final_scores))
+    final_scores = final_scores + noise
+
+    top_local_indices = np.argsort(final_scores)[::-1][:top_n]
+
+    # ------------------------------------------------------------------ #
+    # 12. Build output dicts                                              #
+    # ------------------------------------------------------------------ #
+    results: list[dict[str, Any]] = []
+    for local_i in top_local_indices:
+        global_idx = cand_indices[local_i]
+        row = _df.loc[global_idx]
+        is_boosted = bool(boost[local_i] > 0)
+        # Express match as percentage of raw final score, scaled nicely
+        match_pct = int(round(final_scores[local_i] * 100))
+        match_pct = max(1, min(match_pct, 99))
+
+        results.append({
+            "id": int(row["id"]),
+            "dish": row["dish"],
+            "restaurant": row["restaurant"],
+            "cuisine": row["cuisine"],
+            "price": float(row["price"]),
+            "rating": float(row["rating"]),
+            "area": row["area"],
+            "dietary": row["dietary"],
+            "spicy": bool(row["spicy"]),
+            "delivery_minutes": int(row["delivery_minutes"]),
+            "distance_km": float(row["distance_km"]),
+            "image_url": str(row.get("image_url", "") or ""),
+            "match_percent": match_pct,
+            "reason": _human_reason(
+                mood, dietary, spicy, location,
+                float(row["rating"]), row["cuisine"], is_boosted,
+            ),
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Convenience accessors (used by chatbot for LLM system prompt context)
+# ---------------------------------------------------------------------------
+
+def get_cuisines() -> list[str]:
+    """Sorted list of unique cuisine types in the dataset."""
+    assert _df is not None
+    return sorted(c for c in _df["cuisine"].unique() if c)
+
+
+def get_areas() -> list[str]:
+    """Sorted list of unique areas in the Gwalior dataset."""
+    assert _df is not None
+    return sorted(a for a in _df["area"].unique() if a)
+
+
+# ---------------------------------------------------------------------------
+# Category map — maps canonical category keys to display info + keywords
+# ---------------------------------------------------------------------------
+
+CATEGORY_MAP: dict[str, dict[str, Any]] = {
+    "chinese":      {"label": "Chinese",       "emoji": "🍜", "keywords": ["chinese"]},
+    "italian":      {"label": "Italian",        "emoji": "🍝", "keywords": ["italian", "pasta", "pizza"]},
+    "north indian": {"label": "North Indian",   "emoji": "🥘", "keywords": ["north indian", "punjabi", "mughlai"]},
+    "south indian": {"label": "South Indian",   "emoji": "🥥", "keywords": ["south indian", "idli", "dosa", "kerala"]},
+    "mughlai":      {"label": "Mughlai",        "emoji": "🍖", "keywords": ["mughlai", "awadhi"]},
+    "street food":  {"label": "Street Food",    "emoji": "🌮", "keywords": ["street food", "chaat", "golgappa", "pani puri"]},
+    "fast food":    {"label": "Fast Food",      "emoji": "🍔", "keywords": ["fast food", "burger", "sandwich", "wrap"]},
+    "dessert":      {"label": "Desserts",       "emoji": "🍮", "keywords": ["dessert", "sweet", "mithai", "gulab jamun", "ice cream", "kheer", "halwa", "barfi", "ladoo"]},
+    "snacks":       {"label": "Snacks",         "emoji": "🥨", "keywords": ["snack", "snacks", "namkeen", "bhujia", "samosa"]},
+    "biryani":      {"label": "Biryani",        "emoji": "🍚", "keywords": ["biryani", "pulao"]},
+    "pizza":        {"label": "Pizza",          "emoji": "🍕", "keywords": ["pizza"]},
+    "burger":       {"label": "Burgers",        "emoji": "🍔", "keywords": ["burger"]},
+    "continental":  {"label": "Continental",    "emoji": "🥗", "keywords": ["continental"]},
+    "chinese":      {"label": "Chinese",        "emoji": "🍜", "keywords": ["chinese", "noodles", "fried rice", "manchurian", "chow mein"]},
+    "rajasthani":   {"label": "Rajasthani",     "emoji": "🫕", "keywords": ["rajasthani", "dal baati"]},
+    "tandoor":      {"label": "Tandoor",        "emoji": "🔥", "keywords": ["tandoor", "tandoori"]},
+}
+
+
+def resolve_category(text: str) -> tuple[str, str, str] | None:
+    """Return (key, label, emoji) if text matches a known category, else None."""
+    t = text.strip().casefold()
+    for key, info in CATEGORY_MAP.items():
+        for kw in info["keywords"]:
+            if kw in t:
+                return key, info["label"], info["emoji"]
+    return None
+
+
+def recommend_by_category(
+    category_key: str,
+    top_n: int = 5,
+    user_liked_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Return top_n dishes that match the given category key.
+
+    Matching strategy (in priority order):
+      1. Exact cuisine column match (case-insensitive).
+      2. Partial cuisine column match.
+      3. Keyword match in dish name, meal_type, or mood_tags.
+      4. TF-IDF similarity fallback using the category name as query.
+    """
+    assert _df is not None, "Recommender not loaded."
+
+    top_n = max(1, min(top_n, 10))
+    info = CATEGORY_MAP.get(category_key)
+    keywords: list[str] = info["keywords"] if info else [category_key]
+    label: str = info["label"] if info else category_key.title()
+
+    gwalior = _df[_df["city"].str.casefold() == "gwalior"].copy()
+
+    def _keyword_mask(df: pd.DataFrame) -> pd.Series:
+        mask = pd.Series(False, index=df.index)
+        for kw in keywords:
+            mask |= (
+                df["cuisine"].str.casefold().str.contains(kw, na=False)
+                | df["dish"].str.casefold().str.contains(kw, na=False)
+                | df["meal_type"].str.casefold().str.contains(kw, na=False)
+                | df["mood_tags"].str.casefold().str.contains(kw, na=False)
+            )
+        return mask
+
+    pool = gwalior[_keyword_mask(gwalior)]
+
+    # Fallback: TF-IDF similarity with category label as query
+    if pool.empty:
+        pool = gwalior
+
+    cand_indices = pool.index.tolist()
+    query_soup = " ".join(keywords)
+    query_vec = _tfidf.transform([query_soup])
+    cand_matrix = _tfidf_matrix[cand_indices]
+    sim_scores = cosine_similarity(query_vec, cand_matrix).flatten()
+
+    # Normalise
+    s_min, s_max = sim_scores.min(), sim_scores.max()
+    if s_max > s_min:
+        sim_norm = (sim_scores - s_min) / (s_max - s_min)
+    else:
+        sim_norm = sim_scores
+
+    quality = _quality_scores[cand_indices]
+
+    # Personal boost
+    liked_cuisines: set[str] = set()
+    if user_liked_ids:
+        liked_rows = _df[_df["id"].isin(user_liked_ids)]
+        liked_cuisines = set(liked_rows["cuisine"].str.casefold().unique())
+
+    boost = np.zeros(len(cand_indices))
+    if liked_cuisines:
+        for i, idx in enumerate(cand_indices):
+            if _df.loc[idx, "cuisine"].casefold() in liked_cuisines:
+                boost[i] = 1.0
+
+    final_scores = W_SIM * sim_norm + W_QUALITY * quality + W_BOOST * boost
+    noise = np.random.default_rng().uniform(0, 0.005, len(final_scores))
+    final_scores = final_scores + noise
+
+    top_local = np.argsort(final_scores)[::-1][:top_n]
+
+    results: list[dict[str, Any]] = []
+    for local_i in top_local:
+        global_idx = cand_indices[local_i]
+        row = _df.loc[global_idx]
+        is_boosted = bool(boost[local_i] > 0)
+        match_pct = max(1, min(int(round(final_scores[local_i] * 100)), 99))
+        results.append({
+            "id": int(row["id"]),
+            "dish": row["dish"],
+            "restaurant": row["restaurant"],
+            "cuisine": row["cuisine"],
+            "price": float(row["price"]),
+            "rating": float(row["rating"]),
+            "area": row["area"],
+            "dietary": row["dietary"],
+            "spicy": bool(row["spicy"]),
+            "delivery_minutes": int(row["delivery_minutes"]),
+            "distance_km": float(row["distance_km"]),
+            "image_url": str(row.get("image_url", "") or ""),
+            "match_percent": match_pct,
+            "reason": _human_reason(
+                label.lower(), None, None, None,
+                float(row["rating"]), row["cuisine"], is_boosted,
+            ),
+        })
+
+    return results
+
