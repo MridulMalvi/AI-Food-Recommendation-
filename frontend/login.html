@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Sign in or create your Gwalior Foodie account." />
+  <title>Gwalior Foodie | Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="auth.css" />
+</head>
+
+<body class="auth-body">
+  <div class="auth-bg" aria-hidden="true">
+    <span class="auth-float f1">🍛</span>
+    <span class="auth-float f2">🌶️</span>
+    <span class="auth-float f3">🍜</span>
+    <span class="auth-float f4">🍚</span>
+    <span class="auth-float f5">🍮</span>
+    <span class="auth-float f6">🥘</span>
+  </div>
+
+  <main class="auth-shell">
+    <!-- Brand -->
+    <a href="index.html" class="auth-brand" id="auth-brand-link">
+      <span class="brand-mark">✦</span> Gwalior Foodie
+    </a>
+
+    <!-- Card -->
+    <section class="auth-card" aria-label="Authentication">
+      <div class="auth-card-header">
+        <p class="eyebrow" style="color:#cde5d5;font-size:.65rem;letter-spacing:.15em;margin:0 0 6px;">
+          WELCOME BACK
+        </p>
+        <h1 class="auth-title">Find your<br /><em>perfect bite</em></h1>
+        <p class="auth-sub">Sign in to get personalised food picks in Gwalior.</p>
+      </div>
+
+      <!-- Tab switcher -->
+      <div class="auth-tabs" role="tablist">
+        <button id="tab-login" class="auth-tab active" role="tab" aria-selected="true"
+          aria-controls="panel-login">Login</button>
+        <button id="tab-register" class="auth-tab" role="tab" aria-selected="false"
+          aria-controls="panel-register">Register</button>
+      </div>
+
+      <!-- Login panel -->
+      <div id="panel-login" class="auth-panel" role="tabpanel">
+        <form id="form-login" novalidate>
+          <div class="field-group">
+            <label class="field-label" for="login-username">Username</label>
+            <div class="field-wrap">
+              <span class="field-icon">👤</span>
+              <input id="login-username" class="field-input" type="text" autocomplete="username"
+                placeholder="your_username" maxlength="30" required />
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="login-password">Password</label>
+            <div class="field-wrap">
+              <span class="field-icon">🔒</span>
+              <input id="login-password" class="field-input" type="password" autocomplete="current-password"
+                placeholder="••••••••" maxlength="128" required />
+              <button type="button" class="toggle-pw" id="toggle-login-pw" aria-label="Toggle password visibility">
+                👁
+              </button>
+            </div>
+          </div>
+          <p id="login-error" class="auth-error" hidden></p>
+          <button type="submit" id="btn-login" class="auth-submit">
+            <span class="btn-text">Sign In</span>
+            <span class="btn-spinner" hidden>⟳</span>
+          </button>
+        </form>
+        <p class="auth-switch">Don't have an account?
+          <button type="button" class="auth-switch-btn" id="goto-register">Create one →</button>
+        </p>
+      </div>
+
+      <!-- Register panel -->
+      <div id="panel-register" class="auth-panel" role="tabpanel" hidden>
+        <form id="form-register" novalidate>
+          <div class="field-group">
+            <label class="field-label" for="reg-username">Choose a username</label>
+            <div class="field-wrap">
+              <span class="field-icon">👤</span>
+              <input id="reg-username" class="field-input" type="text" autocomplete="username"
+                placeholder="your_username" maxlength="30" required />
+            </div>
+            <p class="field-hint">3–30 chars, letters, numbers, _ or -</p>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="reg-password">Password</label>
+            <div class="field-wrap">
+              <span class="field-icon">🔒</span>
+              <input id="reg-password" class="field-input" type="password" autocomplete="new-password"
+                placeholder="Min 6 characters" maxlength="128" required />
+              <button type="button" class="toggle-pw" id="toggle-reg-pw" aria-label="Toggle password visibility">
+                👁
+              </button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="reg-confirm">Confirm password</label>
+            <div class="field-wrap">
+              <span class="field-icon">🔒</span>
+              <input id="reg-confirm" class="field-input" type="password" autocomplete="new-password"
+                placeholder="Repeat password" maxlength="128" required />
+            </div>
+          </div>
+          <p id="reg-error" class="auth-error" hidden></p>
+          <button type="submit" id="btn-register" class="auth-submit">
+            <span class="btn-text">Create Account</span>
+            <span class="btn-spinner" hidden>⟳</span>
+          </button>
+        </form>
+        <p class="auth-switch">Already have an account?
+          <button type="button" class="auth-switch-btn" id="goto-login">Sign in →</button>
+        </p>
+      </div>
+    </section>
+
+    <!-- Footer note -->
+    <p class="auth-footer">
+      ✦ Powered by TF-IDF + Cosine Similarity · LangChain · Gwalior's tastiest data
+    </p>
+  </main>
+
+  <script src="auth.js"></script>
+</body>
+
+</html>

@@ -262,6 +262,8 @@ def recommend(
     dietary: str | None = None,
     spicy: bool | None = None,
     user_liked_ids: list[int] | None = None,
+    user_disliked_ids: list[int] | None = None,
+    user_clicked_ids: list[int] | None = None,
     top_n: int = 5,
 ) -> list[dict[str, Any]]:
     """Return up to top_n food recommendations as a list of dicts.
@@ -292,6 +294,10 @@ def recommend(
     # 1. Start with all Gwalior dishes                                    #
     # ------------------------------------------------------------------ #
     base = _df[_df["city"].str.casefold() == "gwalior"].copy()
+
+    # Hard-filter: remove dishes the user has explicitly disliked
+    if user_disliked_ids:
+        base = base[~base["id"].isin(user_disliked_ids)]
 
     # ------------------------------------------------------------------ #
     # 2. Hard filter: dietary (strict — user said veg/non-veg explicitly) #
@@ -368,18 +374,24 @@ def recommend(
     quality = _quality_scores[cand_indices]
 
     # ------------------------------------------------------------------ #
-    # 9. Personal boost (cuisine from liked dishes)                       #
+    # 9. Personal boost (cuisine from liked + clicked dishes)             #
     # ------------------------------------------------------------------ #
     liked_cuisines: set[str] = set()
+    clicked_cuisines: set[str] = set()
     if user_liked_ids:
         liked_rows = _df[_df["id"].isin(user_liked_ids)]
         liked_cuisines = set(liked_rows["cuisine"].str.casefold().unique())
+    if user_clicked_ids:
+        clicked_rows = _df[_df["id"].isin(user_clicked_ids)]
+        clicked_cuisines = set(clicked_rows["cuisine"].str.casefold().unique())
 
     boost = np.zeros(len(cand_indices))
-    if liked_cuisines:
-        for i, idx in enumerate(cand_indices):
-            if _df.loc[idx, "cuisine"].casefold() in liked_cuisines:
-                boost[i] = 1.0
+    for i, idx in enumerate(cand_indices):
+        cuisine = _df.loc[idx, "cuisine"].casefold()
+        if cuisine in liked_cuisines:
+            boost[i] = 1.0           # strong boost for liked cuisine
+        elif cuisine in clicked_cuisines:
+            boost[i] = 0.4           # lighter boost for merely clicked cuisine
 
     # ------------------------------------------------------------------ #
     # 10. Combined final score                                            #

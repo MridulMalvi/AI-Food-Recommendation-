@@ -17,7 +17,14 @@
 <body>
   <main class="app-shell">
     <header class="hero">
-      <div class="brand"><span class="brand-mark">✦</span> Gwalior Foodie</div>
+      <div class="brand">
+        <span class="brand-mark">✦</span> Gwalior Foodie
+        <div class="user-pill" id="user-pill" hidden>
+          <span class="user-avatar" id="user-avatar">👤</span>
+          <span class="user-name" id="user-name"></span>
+          <button class="logout-btn" id="logout-btn" type="button" title="Sign out">⎋ Sign out</button>
+        </div>
+      </div>
       <div class="hero-copy">
         <p class="eyebrow">YOUR LOCAL FOOD COMPANION</p>
         <h1>What are you<br /><em>craving?</em></h1>
@@ -61,6 +68,7 @@
         <img alt="" loading="lazy" />
         <span class="image-fallback">🍽️</span>
         <span class="match"></span>
+      <div class="card-actions">
         <button class="fav-btn" type="button" aria-label="Save to favorites" title="Favorite this dish">
           <svg class="heart-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
@@ -69,6 +77,14 @@
             </path>
           </svg>
         </button>
+        <button class="dislike-btn" type="button" aria-label="Not interested" title="Not interested">
+          <svg class="thumb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3z"/>
+            <path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+          </svg>
+        </button>
+      </div>
       </div>
       <div class="card-content">
         <h3></h3>

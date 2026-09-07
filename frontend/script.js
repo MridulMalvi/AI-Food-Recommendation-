@@ -1,7 +1,7 @@
 // ============================================================
-//  Gwalior Foodie – Frontend Script
-//  Connects to the FastAPI backend, renders recommendation
-//  cards, and handles the Like/Favorite toggle.
+//  Gwalior Foodie – Frontend Script v3
+//  Auth-aware: reads JWT from localStorage, sends Authorization
+//  header with every request. Handles like, dislike, click.
 // ============================================================
 
 const BASE_ORIGIN =
@@ -13,6 +13,44 @@ const BASE_ORIGIN =
 
 const API_URL      = `${BASE_ORIGIN}/api/chat`;
 const FAVORITE_URL = `${BASE_ORIGIN}/api/favorite`;
+const DISLIKE_URL  = `${BASE_ORIGIN}/api/dislike`;
+const CLICK_URL    = `${BASE_ORIGIN}/api/click`;
+
+// ----------------------------------------------------------------
+// Auth helpers
+// ----------------------------------------------------------------
+
+function getToken() {
+  return localStorage.getItem("gf_token") || "";
+}
+
+function getUsername() {
+  return localStorage.getItem("gf_username") || "";
+}
+
+function authHeaders() {
+  const token = getToken();
+  return token
+    ? { "Content-Type": "application/json", "Authorization": `Bearer ${token}` }
+    : { "Content-Type": "application/json" };
+}
+
+function logout() {
+  localStorage.removeItem("gf_token");
+  localStorage.removeItem("gf_username");
+  localStorage.removeItem("gwalior_foodie_favorites");
+  localStorage.removeItem("gwalior_foodie_dislikes");
+  window.location.replace("login.html");
+}
+
+// Redirect to login if no token present
+if (!getToken()) {
+  window.location.replace("login.html");
+}
+
+// ----------------------------------------------------------------
+// DOM references
+// ----------------------------------------------------------------
 
 const conversation  = document.querySelector("#conversation");
 const form          = document.querySelector("#chat-form");
@@ -21,19 +59,53 @@ const sendButton    = document.querySelector("#send-button");
 const noteEl        = document.querySelector("#connection-note");
 const cardTemplate  = document.querySelector("#card-template");
 
-/** Running chat history sent to the backend for context. */
+// User pill in header
+const userPill      = document.getElementById("user-pill");
+const userNameEl    = document.getElementById("user-name");
+const logoutBtn     = document.getElementById("logout-btn");
+
+// Show username in header
+const username = getUsername();
+if (username && userPill) {
+  userNameEl.textContent = username;
+  userPill.hidden = false;
+}
+
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", logout);
+}
+
+// Personalised welcome message
+const welcomeBubble = document.querySelector(".welcome-message .bubble");
+if (welcomeBubble && username) {
+  welcomeBubble.innerHTML =
+    `<strong>Welcome back, ${username}! 👋</strong><br>` +
+    `I remember your taste — looking for a quick dinner, comforting vegetarian food, or something spicy? Just ask!`;
+}
+
+// ----------------------------------------------------------------
+// Chat history
+// ----------------------------------------------------------------
+
 const history = [];
 
-/** In-browser cache of liked dish IDs (persisted in localStorage). */
+// ----------------------------------------------------------------
+// In-browser cache of liked / disliked IDs (hydrated from localStorage)
+// ----------------------------------------------------------------
+
 const favoriteDishIds = new Set(
   JSON.parse(localStorage.getItem("gwalior_foodie_favorites") || "[]")
 );
+const dislikedDishIds = new Set(
+  JSON.parse(localStorage.getItem("gwalior_foodie_dislikes") || "[]")
+);
 
 function saveFavoritesToStorage() {
-  localStorage.setItem(
-    "gwalior_foodie_favorites",
-    JSON.stringify(Array.from(favoriteDishIds))
-  );
+  localStorage.setItem("gwalior_foodie_favorites", JSON.stringify(Array.from(favoriteDishIds)));
+}
+
+function saveDislikesToStorage() {
+  localStorage.setItem("gwalior_foodie_dislikes", JSON.stringify(Array.from(dislikedDishIds)));
 }
 
 // ----------------------------------------------------------------
@@ -80,6 +152,7 @@ async function toggleFavorite(item, favButton) {
   // Optimistic UI update
   if (nextState) {
     favoriteDishIds.add(item.id);
+    dislikedDishIds.delete(item.id);  // un-dislike if liked
     favButton.classList.add("active");
     favButton.setAttribute("title", "Favorited! ❤️");
     favButton.setAttribute("aria-label", "Remove from favorites");
@@ -90,11 +163,12 @@ async function toggleFavorite(item, favButton) {
     favButton.setAttribute("aria-label", "Save to favorites");
   }
   saveFavoritesToStorage();
+  saveDislikesToStorage();
 
   // Sync with backend
   try {
     const payload = {
-      item_id: item.id,          // new field name expected by /api/favorite
+      item_id: item.id,
       is_favorite: nextState,
       dish: item.dish,
       restaurant: item.restaurant,
@@ -109,16 +183,67 @@ async function toggleFavorite(item, favButton) {
 
     const resp = await fetch(FAVORITE_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify(payload),
     });
 
-    if (!resp.ok) {
-      console.warn("Favorite endpoint returned:", resp.status);
-    }
+    if (resp.status === 401) { logout(); return; }
+    if (!resp.ok) console.warn("Favorite endpoint returned:", resp.status);
   } catch (err) {
     console.error("Could not sync favorite with backend:", err);
   }
+}
+
+// ----------------------------------------------------------------
+// Dislike button logic
+// ----------------------------------------------------------------
+
+async function toggleDislike(item, dislikeBtn, favBtn) {
+  const isCurrentlyDisliked = dislikedDishIds.has(item.id);
+  const nextState = !isCurrentlyDisliked;
+
+  // Optimistic UI update
+  if (nextState) {
+    dislikedDishIds.add(item.id);
+    favoriteDishIds.delete(item.id);  // un-like if disliked
+    dislikeBtn.classList.add("active");
+    dislikeBtn.setAttribute("title", "Not interested ✓");
+    dislikeBtn.setAttribute("aria-label", "Remove dislike");
+    favBtn.classList.remove("active");
+    favBtn.setAttribute("title", "Favorite this dish");
+  } else {
+    dislikedDishIds.delete(item.id);
+    dislikeBtn.classList.remove("active");
+    dislikeBtn.setAttribute("title", "Not interested");
+    dislikeBtn.setAttribute("aria-label", "Not interested");
+  }
+  saveFavoritesToStorage();
+  saveDislikesToStorage();
+
+  try {
+    const resp = await fetch(DISLIKE_URL, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ item_id: item.id, is_disliked: nextState, dish: item.dish }),
+    });
+    if (resp.status === 401) { logout(); return; }
+  } catch (err) {
+    console.error("Could not sync dislike:", err);
+  }
+}
+
+// ----------------------------------------------------------------
+// Click / view tracking
+// ----------------------------------------------------------------
+
+async function recordClick(item) {
+  try {
+    await fetch(CLICK_URL, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ item_id: item.id, dish: item.dish }),
+    });
+  } catch (_) { /* silent */ }
 }
 
 // ----------------------------------------------------------------
@@ -134,7 +259,7 @@ function makeCard(item) {
   img.alt = item.dish;
   img.addEventListener("error", () => img.removeAttribute("src"));
 
-  // --- Match badge: use match_percent (integer, 1-99) ---
+  // --- Match badge ---
   const matchPct =
     item.match_percent !== undefined
       ? item.match_percent
@@ -185,6 +310,22 @@ function makeCard(item) {
     toggleFavorite(item, favBtn);
   });
 
+  // --- Dislike button ---
+  const dislikeBtn = card.querySelector(".dislike-btn");
+  if (dislikeBtn) {
+    if (dislikedDishIds.has(item.id)) {
+      dislikeBtn.classList.add("active");
+      dislikeBtn.setAttribute("title", "Not interested ✓");
+    }
+    dislikeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleDislike(item, dislikeBtn, favBtn);
+    });
+  }
+
+  // --- Record click when card is viewed ---
+  card.addEventListener("click", () => recordClick(item), { once: true });
+
   return card;
 }
 
@@ -211,7 +352,6 @@ function showCategoryPage(category, items) {
   const spotlight = document.createElement("div");
   spotlight.className = "category-spotlight";
 
-  // ── Header ──
   const header = document.createElement("div");
   header.className = "spotlight-header";
   header.innerHTML = `
@@ -225,7 +365,6 @@ function showCategoryPage(category, items) {
   `;
   spotlight.appendChild(header);
 
-  // ── Card track ──
   const trackWrap = document.createElement("div");
   trackWrap.className = "spotlight-track-wrap";
   const track = document.createElement("div");
@@ -257,13 +396,18 @@ async function sendMessage(message) {
   try {
     const resp = await fetch(API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({
         message: clean,
         history: history.slice(0, -1).slice(-10),
-        user_id: "default_user",
+        user_id: username || "default_user",
       }),
     });
+
+    if (resp.status === 401) {
+      logout();
+      return;
+    }
 
     const payload = await resp.json();
     if (!resp.ok) {
@@ -274,7 +418,6 @@ async function sendMessage(message) {
     addMessage(payload.message, "assistant");
     history.push({ role: "assistant", content: payload.message });
 
-    // Show category spotlight if a specific category was detected
     if (payload.category && payload.category_recommendations?.length) {
       showCategoryPage(payload.category, payload.category_recommendations);
     } else {
@@ -284,7 +427,7 @@ async function sendMessage(message) {
     const isPersonalised = payload.personalized;
     if (noteEl) {
       noteEl.textContent = isPersonalised
-        ? "✨ Personalised with your liked dishes · TF-IDF + Cosine Similarity"
+        ? `✨ Personalised for ${username || "you"} · TF-IDF + Cosine Similarity`
         : "Recommendations powered by TF-IDF + Cosine Similarity · LangChain Agent";
     }
   } catch (err) {
